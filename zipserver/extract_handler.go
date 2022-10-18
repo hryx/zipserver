@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -178,11 +179,19 @@ func extractHandler(w http.ResponseWriter, r *http.Request) error {
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-		asyncResponse, err := http.DefaultClient.Do(req)
-		if err == nil {
-			asyncResponse.Body.Close()
-		} else {
-			log.Print("Failed to deliver callback: " + err.Error())
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("Failed to deliver callback: %v", err)
+			return
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNoContent {
+			body, err := io.ReadAll(res.Body)
+			if err != nil {
+				log.Printf("Read notification response: %v", err)
+				return
+			}
+			log.Printf("Notification response: %s %s", res.Status, string(body))
 		}
 	})()
 
