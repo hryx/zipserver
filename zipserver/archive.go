@@ -1,7 +1,6 @@
 package zipserver
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -40,8 +39,9 @@ type Archiver struct {
 
 // ExtractedFile represents a file extracted from a .zip into a GCS bucket
 type ExtractedFile struct {
-	Key  string
-	Size uint64
+	Key      string
+	Size     uint64
+	Metadata interface{} `json:",omitempty"`
 }
 
 // NewArchiver creates a new archiver from the given config
@@ -139,15 +139,16 @@ type UploadFileTask struct {
 
 // UploadFileResult is successful is Error is nil - in that case, it contains the
 // GCS key the file was uploaded under, and the number of bytes written for that file.
+// An error causes the job to abort processing all further files in the archive.
 type UploadFileResult struct {
 	Error error
-	Key   string
-	Size  uint64
+	ExtractedFile
 }
 
 func uploadWorker(
 	ctx context.Context,
 	a *Archiver,
+	analyzer Analyzer,
 	tasks <-chan UploadFileTask,
 	results chan<- UploadFileResult,
 	done chan struct{},
@@ -159,16 +160,20 @@ func uploadWorker(
 		key := task.Key
 
 		ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Config.FilePutTimeout))
-		resource, err := a.extractAndUploadOne(ctx, key, file)
+		info, err := a.extractAndUploadOne(ctx, key, file, analyzer)
 		cancel() // Free resources now instead of deferring till func returns
 
 		if err != nil {
+			if errors.Is(err, ErrSkipped) {
+				log.Printf("Skipping file: %s", key)
+				continue
+			}
 			log.Print("Failed sending " + key + ": " + err.Error())
-			results <- UploadFileResult{err, key, 0}
+			results <- UploadFileResult{Error: err}
 			return
 		}
 
-		results <- UploadFileResult{nil, resource.key, resource.size}
+		results <- UploadFileResult{ExtractedFile: info}
 	}
 }
 
@@ -177,6 +182,7 @@ func (a *Archiver) sendZipExtracted(
 	ctx context.Context,
 	prefix, fname string,
 	limits *ExtractLimits,
+	analyzer Analyzer,
 ) ([]ExtractedFile, error) {
 	zipReader, err := zip.OpenReader(fname)
 	if err != nil {
@@ -233,7 +239,7 @@ func (a *Archiver) sendZipExtracted(
 	defer cancel()
 
 	for i := 0; i < limits.ExtractionThreads; i++ {
-		go uploadWorker(ctx, a, tasks, results, done)
+		go uploadWorker(ctx, a, analyzer, tasks, results, done)
 	}
 
 	activeWorkers := limits.ExtractionThreads
@@ -262,7 +268,7 @@ func (a *Archiver) sendZipExtracted(
 				extractError = result.Error
 				cancel()
 			} else {
-				extractedFiles = append(extractedFiles, ExtractedFile{result.Key, result.Size})
+				extractedFiles = append(extractedFiles, result.ExtractedFile)
 				fileCount++
 			}
 		case <-done:
@@ -284,77 +290,54 @@ func (a *Archiver) sendZipExtracted(
 
 // sends an individual file from a zip
 // Caller should set the job timeout in ctx.
-func (a *Archiver) extractAndUploadOne(ctx context.Context, key string, file *zip.File) (*ResourceSpec, error) {
-	readerCloser, err := file.Open()
+func (a *Archiver) extractAndUploadOne(
+	ctx context.Context,
+	key string,
+	file *zip.File,
+	analyzer Analyzer,
+) (ExtractedFile, error) {
+	none := ExtractedFile{}
+
+	analyzerReader, err := file.Open()
 	if err != nil {
-		return nil, err
+		return none, err
 	}
-	defer readerCloser.Close()
+	defer analyzerReader.Close()
 
-	var reader io.Reader = readerCloser
-
-	resource := &ResourceSpec{
-		key: key,
-	}
-
-	// try determining MIME by extension
-	mimeType := mime.TypeByExtension(path.Ext(key))
-
-	var buffer bytes.Buffer
-	_, err = io.Copy(&buffer, io.LimitReader(reader, 512))
-
+	info, err := analyzer.Analyze(analyzerReader, key)
 	if err != nil {
-		return nil, errors.Wrap(err, 0)
+		return none, err
 	}
 
-	contentMimeType := http.DetectContentType(buffer.Bytes())
-	// join the bytes read and the original reader
-	reader = io.MultiReader(&buffer, reader)
+	// Analysis may have called Read() but we cannot seek back, so open a new Reader with initialized cursor.
+	uploadReader, err := file.Open()
+	if err != nil {
+		return none, err
+	}
+	defer uploadReader.Close()
 
-	if contentMimeType == "application/x-gzip" || contentMimeType == "application/gzip" {
-		resource.contentEncoding = "gzip"
+	log.Printf("Sending key=%q mime=%q encoding=%q", info.Key, info.ContentType, info.ContentEncoding)
 
-		// try to see if there's a real extension hidden beneath
-		if strings.HasSuffix(key, ".gz") {
-			realMimeType := mime.TypeByExtension(path.Ext(strings.TrimSuffix(key, ".gz")))
+	var size uint64 // Written to by limitedReader
+	limited := limitedReader(uploadReader, file.UncompressedSize64, &size)
 
-			if realMimeType != "" {
-				mimeType = realMimeType
-			}
+	err = a.Storage.PutFileWithSetup(ctx, a.Bucket, info.Key, limited, func(r *http.Request) error {
+		r.Header.Set("X-Goog-Acl", "public-read")
+		r.Header.Set("Content-Type", info.ContentType)
+		if info.ContentEncoding != "" {
+			r.Header.Set("Content-Encoding", info.ContentEncoding)
 		}
-
-	} else if strings.HasSuffix(key, ".br") {
-		// there is no way to detect a brotli stream by content, so we assume if it ends if .br then it's brotli
-		// this path is used for Unity 2020 webgl games built with brotli compression
-		resource.contentEncoding = "br"
-		realMimeType := mime.TypeByExtension(path.Ext(strings.TrimSuffix(key, ".br")))
-
-		if realMimeType != "" {
-			mimeType = realMimeType
-		}
-	} else if mimeType == "" {
-		// fall back to the extension detected from content, eg. someone uploaded a .png with wrong extension
-		mimeType = contentMimeType
-	}
-
-	if mimeType == "" {
-		// default mime type
-		mimeType = "application/octet-stream"
-	}
-	resource.contentType = mimeType
-
-	resource.applyRewriteRules()
-
-	log.Printf("Sending: %s", resource)
-
-	limited := limitedReader(reader, file.UncompressedSize64, &resource.size)
-
-	err = a.Storage.PutFileWithSetup(ctx, a.Bucket, resource.key, limited, resource.setupRequest)
+		return nil
+	})
 	if err != nil {
-		return resource, errors.Wrap(err, 0)
+		return none, errors.Wrap(err, 0)
 	}
 
-	return resource, nil
+	return ExtractedFile{
+		Key:      info.Key,
+		Size:     size,
+		Metadata: info.Metadata,
+	}, nil
 }
 
 // ExtractZip downloads the zip at `key` to a temporary file,
@@ -364,6 +347,7 @@ func (a *Archiver) ExtractZip(
 	ctx context.Context,
 	key, prefix string,
 	limits *ExtractLimits,
+	analyzer Analyzer,
 ) ([]ExtractedFile, error) {
 	fname, err := a.fetchZip(ctx, key)
 	if err != nil {
@@ -372,7 +356,7 @@ func (a *Archiver) ExtractZip(
 
 	defer os.Remove(fname)
 	prefix = path.Join(a.ExtractPrefix, prefix)
-	return a.sendZipExtracted(ctx, prefix, fname, limits)
+	return a.sendZipExtracted(ctx, prefix, fname, limits, analyzer)
 }
 
 // Caller should set the job timeout in ctx.
@@ -382,5 +366,6 @@ func (a *Archiver) UploadZipFromFile(
 	limits *ExtractLimits,
 ) ([]ExtractedFile, error) {
 	prefix = path.Join("_zipserver", prefix)
-	return a.sendZipExtracted(ctx, prefix, fname, limits)
+	// TODO: Add CLI option to choose game or music content.
+	return a.sendZipExtracted(ctx, prefix, fname, limits, &GameAnalyzer{})
 }

@@ -101,9 +101,16 @@ func extractHandler(w http.ResponseWriter, r *http.Request) error {
 
 	limits := loadLimits(params, config)
 
+	var analyzer Analyzer
+	if params.Get("contents") == "music" {
+		analyzer = &MusicAnalyzer{}
+	} else {
+		analyzer = &GameAnalyzer{}
+	}
+
 	process := func(ctx context.Context) ([]ExtractedFile, error) {
 		archiver := NewArchiver(config)
-		files, err := archiver.ExtractZip(ctx, key, prefix, limits)
+		files, err := archiver.ExtractZip(ctx, key, prefix, limits, analyzer)
 
 		return files, err
 	}
