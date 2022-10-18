@@ -6,7 +6,6 @@ import (
 	"io"
 
 	"github.com/dhowden/tag"
-	"github.com/go-errors/errors"
 )
 
 // MusicAnalyzer uses rules according to music albums.
@@ -15,7 +14,7 @@ import (
 type MusicAnalyzer struct{}
 
 func (m MusicAnalyzer) Analyze(r io.Reader, key string) (AnalyzeResult, error) {
-	res := AnalyzeResult{Key: key}
+	res := AnalyzeResult{}
 
 	// TODO: The music tag library requires a ReadSeeker (understandably),
 	// which a Reader does not satisfy. Here is a naive implementation that
@@ -25,13 +24,17 @@ func (m MusicAnalyzer) Analyze(r io.Reader, key string) (AnalyzeResult, error) {
 
 	b, err := io.ReadAll(r)
 	if err != nil {
-		return res, errors.Wrap(err, 0)
+		return res, fmt.Errorf("read bytes: %w", err)
 	}
 
 	rs := bytes.NewReader(b)
 	md, err := tag.ReadFrom(rs)
 	if err != nil {
-		return res, errors.Wrap(err, 0)
+		// Tag parser expects at least 11 bytes.
+		if err == io.ErrUnexpectedEOF {
+			return res, fmt.Errorf("%w: file too short", ErrSkipped)
+		}
+		return res, fmt.Errorf("new tag reader: %w", err)
 	}
 
 	// Package tag provides these already, but let's set them explicitly
@@ -71,6 +74,7 @@ func (m MusicAnalyzer) Analyze(r io.Reader, key string) (AnalyzeResult, error) {
 		Lyrics:      md.Lyrics(),
 		Comment:     md.Comment(),
 	}
+	res.Key = key
 
 	return res, nil
 }
