@@ -84,17 +84,17 @@ type TrackInfo struct {
 
 	// Below are provided directly by the tag package.
 
-	Title       string
-	Album       string
-	Artist      string
-	AlbumArtist string
-	Composer    string
-	Genre       string
-	Year        int
-	Track       int
-	TrackTotal  int
-	Disc        int
-	DiscTotal   int
-	Lyrics      string
-	Comment     string
+	Title       string `json:",omitempty"`
+	Album       string `json:",omitempty"`
+	Artist      string `json:",omitempty"`
+	AlbumArtist string `json:",omitempty"`
+	Composer    string `json:",omitempty"`
+	Genre       string `json:",omitempty"`
+	Year        int    `json:",omitempty"`
+	Track       int    `json:",omitempty"`
+	TrackTotal  int    `json:",omitempty"`
+	Disc        int    `json:",omitempty"`
+	DiscTotal   int    `json:",omitempty"`
+	Lyrics      string `json:",omitempty"`
+	Comment     string `json:",omitempty"`
 }
