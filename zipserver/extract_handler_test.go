@@ -2,6 +2,8 @@ package zipserver
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 
@@ -41,4 +43,12 @@ func Test_Limits(t *testing.T) {
 
 	el = loadLimits(values, &defaultConfig)
 	assert.EqualValues(t, el.MaxFileSize, customMaxFileSize)
+}
+
+func TestExtractHandlerMissingQueryParam(t *testing.T) {
+	testServer := httptest.NewServer(errorHandler(extractHandler))
+	defer testServer.Close()
+	res, err := http.Get(testServer.URL + "/extract")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusInternalServerError, res.StatusCode)
 }

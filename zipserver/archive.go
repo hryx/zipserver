@@ -133,8 +133,8 @@ func shouldIgnoreFile(fname string) bool {
 
 // UploadFileTask contains the information needed to extract a single file from a .zip
 type UploadFileTask struct {
-	File *zip.File
-	Key  string
+	DestPathPrefix string
+	LocalFile      *zip.File
 }
 
 // UploadFileResult is successful is Error is nil - in that case, it contains the
@@ -156,19 +156,16 @@ func uploadWorker(
 	defer func() { done <- struct{}{} }()
 
 	for task := range tasks {
-		file := task.File
-		key := task.Key
-
 		ctx, cancel := context.WithTimeout(ctx, time.Duration(a.Config.FilePutTimeout))
-		info, err := a.extractAndUploadOne(ctx, key, file, analyzer)
+		info, err := a.extractAndUploadOne(ctx, task, analyzer)
 		cancel() // Free resources now instead of deferring till func returns
 
 		if err != nil {
 			if errors.Is(err, ErrSkipped) {
-				log.Printf("Skipping file: %s", key)
+				log.Printf("Skipping file: %s", task.LocalFile.Name)
 				continue
 			}
-			log.Print("Failed sending " + key + ": " + err.Error())
+			log.Print("Failed sending " + task.LocalFile.Name + ": " + err.Error())
 			results <- UploadFileResult{Error: err}
 			return
 		}
@@ -247,8 +244,10 @@ func (a *Archiver) sendZipExtracted(
 	go func() {
 		defer func() { close(tasks) }()
 		for _, file := range fileList {
-			key := path.Join(prefix, file.Name)
-			task := UploadFileTask{file, key}
+			task := UploadFileTask{
+				DestPathPrefix: prefix,
+				LocalFile:      file,
+			}
 			select {
 			case tasks <- task:
 			case <-ctx.Done():
@@ -292,11 +291,11 @@ func (a *Archiver) sendZipExtracted(
 // Caller should set the job timeout in ctx.
 func (a *Archiver) extractAndUploadOne(
 	ctx context.Context,
-	key string,
-	file *zip.File,
+	task UploadFileTask,
 	analyzer Analyzer,
 ) (ExtractedFile, error) {
 	none := ExtractedFile{}
+	file := task.LocalFile
 
 	analyzerReader, err := file.Open()
 	if err != nil {
@@ -304,7 +303,7 @@ func (a *Archiver) extractAndUploadOne(
 	}
 	defer analyzerReader.Close()
 
-	info, err := analyzer.Analyze(analyzerReader, key)
+	info, err := analyzer.Analyze(analyzerReader, file.Name)
 	if err != nil {
 		return none, err
 	}
@@ -316,12 +315,17 @@ func (a *Archiver) extractAndUploadOne(
 	}
 	defer uploadReader.Close()
 
-	log.Printf("Sending key=%q mime=%q encoding=%q", info.Key, info.ContentType, info.ContentEncoding)
+	sendName := file.Name
+	if info.RenameTo != "" {
+		sendName = info.RenameTo
+	}
+	destKey := path.Join(task.DestPathPrefix, sendName)
+	log.Printf("Sending key=%q mime=%q encoding=%q", destKey, info.ContentType, info.ContentEncoding)
 
 	var size uint64 // Written to by limitedReader
 	limited := limitedReader(uploadReader, file.UncompressedSize64, &size)
 
-	err = a.Storage.PutFileWithSetup(ctx, a.Bucket, info.Key, limited, func(r *http.Request) error {
+	err = a.Storage.PutFileWithSetup(ctx, a.Bucket, destKey, limited, func(r *http.Request) error {
 		r.Header.Set("X-Goog-Acl", "public-read")
 		r.Header.Set("Content-Type", info.ContentType)
 		if info.ContentEncoding != "" {
@@ -334,7 +338,7 @@ func (a *Archiver) extractAndUploadOne(
 	}
 
 	return ExtractedFile{
-		Key:      info.Key,
+		Key:      destKey,
 		Size:     size,
 		Metadata: info.Metadata,
 	}, nil

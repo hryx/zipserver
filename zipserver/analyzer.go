@@ -14,11 +14,11 @@ var ErrSkipped = errors.New("skipped file")
 type Analyzer interface {
 	// Analyze should return info about the contained file.
 	// It should return ErrSkipped if a file was ignored.
-	Analyze(r io.Reader, key string) (AnalyzeResult, error)
+	Analyze(r io.Reader, filename string) (AnalyzeResult, error)
 }
 
 type AnalyzeResult struct {
-	Key             string // Analysis may choose a new key/filename
+	RenameTo        string // If non-empty, file should be renamed before uploading
 	Metadata        interface{}
 	ContentType     string
 	ContentEncoding string

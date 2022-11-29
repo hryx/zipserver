@@ -373,6 +373,47 @@ func Test_ExtractInMemory(t *testing.T) {
 			assert.EqualValues(t, k, storage.objectPath(config.Bucket, zipPath), "make sure the only remaining object is the zip")
 		}
 	})
+
+	storage, err = NewMemStorage()
+
+	withZip(&zipLayout{
+		entries: []zipEntry{
+			{
+				name:             "a/b/c/file1",
+				data:             []byte("data"),
+				expectedMimeType: "text/plain; charset=utf-8",
+			},
+			{
+				name:             "file2.txt",
+				data:             []byte("data"),
+				expectedMimeType: "text/plain; charset=utf-8",
+			},
+			{
+				name:             "a/b/c.other",
+				data:             []byte("data"),
+				expectedMimeType: "text/plain; charset=utf-8",
+			},
+			{
+				name:             "file4",
+				data:             []byte("data"),
+				expectedMimeType: "text/plain; charset=utf-8",
+			},
+		},
+	}, func(zl *zipLayout) {
+		limits := testLimits()
+		require.NoError(t, err)
+		archiver = &Archiver{storage, config}
+		analyzer = &GameAnalyzer{
+			onlyExtractFiles: []string{"a/b/c.other", "a/b/nonexistent", "file2.txt"},
+		}
+
+		res, err := archiver.ExtractZip(ctx, zipPath, prefix, limits, analyzer)
+		require.NoError(t, err)
+		// Can't compare the entire slice verbatim because of nondeterministic workload order
+		assert.Len(t, res, 2)
+		assert.Contains(t, res, ExtractedFile{Key: "zipserver_test/mem_test_extracted/file2.txt", Size: 4})
+		assert.Contains(t, res, ExtractedFile{Key: "zipserver_test/mem_test_extracted/a/b/c.other", Size: 4})
+	})
 }
 
 // TestFetchZipFailing simulates a download failing after the ouptut file has been created,

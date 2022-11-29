@@ -3,6 +3,7 @@ package zipserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -94,6 +95,20 @@ func extractHandler(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	fileListParam := params.Get("only_files")
+	if err != nil {
+		return err
+	}
+	var fileList []string
+	if fileListParam != "" {
+		if err := json.Unmarshal([]byte(fileListParam), &fileList); err != nil {
+			return fmt.Errorf("unmarshal files param: %w", err)
+		}
+		if len(fileList) == 0 {
+			return fmt.Errorf("fileList param was empty")
+		}
+	}
+
 	hasLock := tryLockKey(key)
 	if !hasLock {
 		// already being extracted in another handler, ask consumer to wait
@@ -102,11 +117,8 @@ func extractHandler(w http.ResponseWriter, r *http.Request) error {
 
 	limits := loadLimits(params, config)
 
-	var analyzer Analyzer
-	if params.Get("contents") == "music" {
-		analyzer = &MusicAnalyzer{}
-	} else {
-		analyzer = &GameAnalyzer{}
+	analyzer := &GameAnalyzer{
+		onlyExtractFiles: fileList,
 	}
 
 	process := func(ctx context.Context) ([]ExtractedFile, error) {
